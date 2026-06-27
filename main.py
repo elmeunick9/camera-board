@@ -3,7 +3,8 @@ import numpy as np
 import yaml
 import os
 import math
-from pynput.keyboard import Controller, Key
+import time
+from pynput.keyboard import Key, Controller
 
 keyboard = Controller()
 WINDOW_NAME = "DIY Motion Pad - Editor Mode"
@@ -91,10 +92,33 @@ print("  • Press 's' to permanently SAVE all modifications to config.yaml.")
 print("  • Press 'ESC' or click 'X' to close.")
 print("=====================================================================")
 
+region_pressed = [False] * len(regions_data)
+visual_flash_timers = [0] * len(regions_data)
+
+# --- STATE AND REAL-TIME COOLDOWN MATRICES ---
+kernel_memory = {}          # Tracks past affinity values: {(idx, x, y): affinity}
+region_pressed = [False] * len(regions_data)
+visual_flash_timers = [0] * len(regions_data)
+
+# Tracks the exact timestamp of the absolute last keyboard event fired per region
+# Initialized to 0 so they are instantly ready to trigger at startup
+last_event_times = [0.0] * len(regions_data)
+
+# Tracks the exact timestamp of the absolute last keyboard event fired per region
+# Initialized to 0 so they are instantly ready to trigger at startup
+last_event_times = [0.0] * len(regions_data) 
+last_frame_time = time.time()
+
 while True:
     ret, frame = cap.read()
     if not ret: break
     if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1: break
+
+    current_time = time.time()
+    dt = current_time - last_frame_time
+    last_frame_time = current_time
+
+    if dt <= 0: dt = 0.001
 
     if mirror: frame = cv2.flip(frame, 1)
     height, width = frame.shape[:2]
@@ -104,53 +128,109 @@ while True:
 
     for idx, reg in enumerate(regions_data):
         pts = np.array([[int(p[0] * width), int(p[1] * height)] for p in reg['corners']], np.int32).reshape((-1, 1, 2))
-
-        mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [pts], 255)
-        avg_color = cv2.mean(hsv_frame, mask=mask)[:3]
-
-        if fg_calibration_mode:
-            color_draw = (0, 255, 255) 
-            status_text = f"WAITING FOR KEY: '{reg['key'].upper()}'"
-        else:
-            color_draw = (0, 255, 0) 
-            thresh_limit = reg.get('affinity_threshold', 50)
-            status_text = f"Target: {thresh_limit}%"
-
+        rx, ry, rw, rh = cv2.boundingRect(pts)
+        
         target_key = get_key(reg['key'])
+        thresh_limit = reg.get('affinity_threshold', 50)
+        
+        max_box_presence = 0.0
+        any_kernel_stomped = False
+        max_velocity_found = -9999.0
 
-        if not fg_calibration_mode and reg.get('background_hsv') and reg.get('foreground_hsv'):
+        kernel_size = 16
+        stride = 16
+        VELOCITY_SPIKE_THRESH = 750 
+        COOLDOWN_TIME = 0.200 # 200 milliseconds absolute time-lock window
+        
+        if reg.get('background_hsv') and reg.get('foreground_hsv'):
             bg = np.array(reg['background_hsv'])
             fg = np.array(reg['foreground_hsv'])
-            curr = np.array(avg_color)
+            
+            for ky in range(ry, ry + rh - kernel_size, stride):
+                for kx in range(rx, rx + rw - kernel_size, stride):
+                    if cv2.pointPolygonTest(pts, (kx + kernel_size//2, ky + kernel_size//2), False) >= 0:
+                        
+                        kernel_roi = hsv_frame[ky:ky+kernel_size, kx:kx+kernel_size]
+                        kernel_avg = cv2.mean(kernel_roi)[:3]
+                        
+                        curr = np.array(kernel_avg)
+                        d_bg = np.linalg.norm(curr - bg)
+                        d_fg = np.linalg.norm(curr - fg)
+                        tot = d_bg + d_fg
+                        
+                        if tot > 0:
+                            k_affinity = (d_bg / tot) * 100
+                            if k_affinity > max_box_presence:
+                                max_box_presence = k_affinity
+                            
+                            mem_key = (idx, kx, ky)
+                            previous_k_affinity = kernel_memory.get(mem_key, 0.0)
+                            
+                            k_velocity = (k_affinity - previous_k_affinity) / dt
+                            kernel_memory[mem_key] = k_affinity
+                            
+                            if k_velocity > max_velocity_found:
+                                max_velocity_found = k_velocity
 
-            dist_to_bg = np.linalg.norm(curr - bg)
-            dist_to_fg = np.linalg.norm(curr - fg)
-            total_dist = dist_to_bg + dist_to_fg
+                            if k_affinity >= thresh_limit and k_velocity > VELOCITY_SPIKE_THRESH:
+                                any_kernel_stomped = True
 
-            if total_dist > 0:
-                fg_affinity = (dist_to_bg / total_dist) * 100
-                thresh_limit = reg.get('affinity_threshold', 50)
-                status_text = f"Fit: {int(fg_affinity)}%/{thresh_limit}%"
+            # --- TIME-DEBOUNCED STATE CONTROLLER ---
+            color_draw = (0, 255, 0)
+            status_text = "IDLE"
 
-                if fg_affinity >= thresh_limit:
-                    color_draw = active_color
-                    if not region_pressed[idx]:
-                        keyboard.press(target_key)
-                        region_pressed[idx] = True
-                else:
-                    if region_pressed[idx]:
+            # Check how many milliseconds have ticking by since this specific box acted
+            time_since_last_event = current_time - last_event_times[idx]
+
+            if max_box_presence >= thresh_limit:
+                color_draw = active_color 
+                status_text = "HOLD ACTIVE"
+                
+                if not region_pressed[idx]:
+                    # CASE A: Fresh down-stomp entry event
+                    keyboard.press(target_key)
+                    region_pressed[idx] = True
+                    last_event_times[idx] = current_time # Start the 200ms countdown clock
+                    print(f"[-] KEY DOWN (Fresh): {reg['key'].upper()}")
+                    
+                elif any_kernel_stomped:
+                    # CASE B: Velocity spike detected inside an occupied box.
+                    # CRITICAL CHECK: Has the 200ms temporal debounce window expired?
+                    if time_since_last_event >= COOLDOWN_TIME:
                         keyboard.release(target_key)
-                        region_pressed[idx] = False
-        
-        cv2.polylines(frame, [pts], True, color_draw, 2)
-        for pt in reg['corners']:
-            cv2.circle(frame, (int(pt[0] * width), int(pt[1] * height)), 4, (255, 255, 0), -1)
+                        keyboard.press(target_key)
+                        
+                        last_event_times[idx] = current_time # Reset the cooldown clock for the next tap
+                        visual_flash_timers[idx] = 4
+                        print(f"[⚡] DOUBLE-TAP PULSE: {reg['key'].upper()} | Wait Time Was: {int(time_since_last_event * 1000)}ms")
+                    else:
+                        # Velocity spiked, but we ignored it because it's within the 200ms structural noise window
+                        status_text = "DEBOUNCE BLOCK"
+            else:
+                if region_pressed[idx]:
+                    # CASE C: Completely clearing out of the zone
+                    keyboard.release(target_key)
+                    region_pressed[idx] = False
+                    last_event_times[idx] = current_time # Reset timer on release to clear exit ripples
+                    print(f"[x] KEY UP: {reg['key'].upper()}")
 
+            if visual_flash_timers[idx] > 0:
+                color_draw = (255, 255, 0) # Cyan
+                status_text = "⚡ STOMP PULSE ⚡"
+                visual_flash_timers[idx] -= 1
+
+            status_text += f" | Pres: {int(max_box_presence)}% | TimeDelta: {int(time_since_last_event * 1000)}ms"
+                    
+        else:
+            color_draw = (0, 165, 255)
+            status_text = "UNCALIBRATED - Press 'b' then 'f'"
+
+        cv2.polylines(frame, [pts], True, color_draw, 2)
         text_pos = (int(reg['corners'][0][0] * width), int(reg['corners'][0][1] * height) - 10)
         cv2.putText(frame, status_text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_draw, 1, cv2.LINE_AA)
 
     cv2.imshow(WINDOW_NAME, frame)
+    key = cv2.waitKey(1)
     
     # Removed the '& 0xFF' mask here because full-width virtual key integer numbers 
     # are required to identify arrow configurations correctly across platforms.
