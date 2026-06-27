@@ -260,10 +260,59 @@ while True:
         shoe_px  = (d_shoe < d_leg).astype(np.uint8) * 255     # pixels closer to shoe
         mask     = cv2.bitwise_and(mask, shoe_px)
 
-    fg_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  morph_kern)
+    # ------------------------------------------------------------------
+    # Primary cleanup
+    # ------------------------------------------------------------------
+
+    fg_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, morph_kern)
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, morph_kern)
 
-    # ── Find blobs ─────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Optional blob splitting
+    # Attempt to separate shoes connected by a thin bridge
+    # ------------------------------------------------------------------
+
+    SPLIT_KERNEL_SIZE = 16
+    split_kern = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (SPLIT_KERNEL_SIZE, SPLIT_KERNEL_SIZE)
+    )
+
+    # Original blob count
+    orig_contours, _ = cv2.findContours(
+        fg_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    orig_count = len(orig_contours)
+
+    # Shrink blobs slightly to break thin connections
+    split_mask = cv2.erode(
+        fg_mask,
+        split_kern,
+        iterations=1
+    )
+
+    # Count blobs after erosion
+    split_contours, _ = cv2.findContours(
+        split_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    split_count = len(split_contours)
+    split_max_area = max(
+        (cv2.contourArea(c) for c in split_contours),
+        default=0
+    )
+
+    # Only accept erosion if:
+    # 1) it increased the number of blobs
+    # 2) the resulting blobs are still large enough to be shoes
+    if split_count > orig_count and split_max_area > MIN_BLOB_AREA:
+        fg_mask = split_mask
+
     contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     blobs = []
@@ -278,34 +327,60 @@ while True:
         cy = int(M['m01'] / M['m00'])
         blobs.append((area, cx, cy, cnt))
 
-    # Keep the two largest blobs
-    blobs.sort(key=lambda b: b[0], reverse=True)
-    raw_centres = [(cx, cy) for _, cx, cy, _ in blobs[:2]]
+        # Keep the two largest blobs
+        blobs.sort(key=lambda b: b[0], reverse=True)
+        raw_centres = [(cx, cy) for _, cx, cy, _ in blobs[:2]]
 
-    # ── Proximity-matched smoothing ────────────────────────────────────────────
-    last_known = [buf[-1] if buf else None for buf in shoe_history]
+        # ------------------------------------------------------------------
+        # Tracking logic
+        # ------------------------------------------------------------------
 
-    assigned = [False] * len(raw_centres)
-    for buf_idx, last in enumerate(last_known):
-        if last is None:
-            continue
-        best_dist, best_det = float('inf'), -1
-        for det_idx, pt in enumerate(raw_centres):
-            if assigned[det_idx]:
-                continue
-            d = math.hypot(pt[0] - last[0], pt[1] - last[1])
-            if d < best_dist:
-                best_dist, best_det = d, det_idx
-        if best_det != -1:
-            shoe_history[buf_idx].append(raw_centres[best_det])
-            assigned[best_det] = True
-
-    for det_idx, pt in enumerate(raw_centres):
-        if not assigned[det_idx]:
+        if len(raw_centres) == 0:
+            # Nothing visible -> clear tracking completely
             for buf in shoe_history:
-                if not buf:
-                    buf.append(pt)
-                    break
+                buf.clear()
+
+        elif len(raw_centres) == 1:
+            # Only one shoe visible.
+            # Do NOT preserve the old second shoe position.
+            # The occlusion map will infer the hidden foot.
+            shoe_history[0].clear()
+            shoe_history[1].clear()
+            shoe_history[0].append(raw_centres[0])
+
+        else:
+            # Two blobs visible -> perform proximity matching
+            last_known = [buf[-1] if buf else None for buf in shoe_history]
+
+            assigned = [False] * len(raw_centres)
+
+            for buf_idx, last in enumerate(last_known):
+                if last is None:
+                    continue
+
+                best_dist = float('inf')
+                best_det = -1
+
+                for det_idx, pt in enumerate(raw_centres):
+                    if assigned[det_idx]:
+                        continue
+
+                    d = math.hypot(pt[0] - last[0], pt[1] - last[1])
+
+                    if d < best_dist:
+                        best_dist = d
+                        best_det = det_idx
+
+                if best_det != -1:
+                    shoe_history[buf_idx].append(raw_centres[best_det])
+                    assigned[best_det] = True
+
+            for det_idx, pt in enumerate(raw_centres):
+                if not assigned[det_idx]:
+                    for buf in shoe_history:
+                        if not buf:
+                            buf.append(pt)
+                            break
 
     if len(raw_centres) < len([b for b in shoe_history if b]):
         if raw_centres:
@@ -362,7 +437,7 @@ while True:
                 shoe_centres[0][1] - shoe_centres[1][1],
             ) < fw * occl_thresh
         )
-        if len(shoe_centres) == 1 or too_close:
+        if len(shoe_centres) == 1:
             for visible_key in list(detected_region_keys):
                 inferred_key = occlusion_map.get(str(visible_key))
                 if inferred_key and inferred_key in key_to_idx:
