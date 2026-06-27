@@ -1,15 +1,14 @@
-auto_release: false
 camera: {device_index: 1, mirror_preview: true}
 regions:
 - affinity_threshold: 50
   background_hsv: [68, 15, 150]
   corners:
-  - [0.26875, 0.4041666666666667]
-  - [0.4, 0.5020833333333333]
+  - [0.2578125, 0.51875]
+  - [0.4, 0.5666666666666667]
   - [0.3953125, 0.7395833333333334]
   - [0.2171875, 0.7875]
   foreground_hsv: [85, 62, 31]
-  key: '1'
+  key: left
   name: Left Step
 - affinity_threshold: 50
   background_hsv: [73, 13, 156]
@@ -19,27 +18,27 @@ regions:
   - [0.6453125, 0.9666666666666667]
   - [0.3796875, 0.9729166666666667]
   foreground_hsv: [88, 60, 30]
-  key: '2'
+  key: up
   name: Up Step
 - affinity_threshold: 50
   background_hsv: [68, 12, 151]
   corners:
-  - [0.328125, 0.35]
-  - [0.61875, 0.34375]
-  - [0.5765625, 0.475]
-  - [0.4125, 0.4875]
+  - [0.403125, 0.39166666666666666]
+  - [0.5765625, 0.38333333333333336]
+  - [0.5703125, 0.5020833333333333]
+  - [0.415625, 0.5125]
   foreground_hsv: [91, 59, 33]
-  key: '3'
+  key: down
   name: Down Step
 - affinity_threshold: 50
   background_hsv: [70, 13, 152]
   corners:
-  - [0.5890625, 0.51875]
-  - [0.696875, 0.37916666666666665]
-  - [0.7875, 0.7645833333333333]
+  - [0.5765625, 0.5666666666666667]
+  - [0.734375, 0.5166666666666667]
+  - [0.7609375, 0.74375]
   - [0.6046875, 0.7333333333333333]
   foreground_hsv: [85, 63, 26]
-  key: '4'
+  key: right
   name: Right Step
 settings:
   active_box_color: [255, 0, 255]
