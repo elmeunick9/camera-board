@@ -9,14 +9,31 @@ keyboard = Controller()
 WINDOW_NAME = "DIY Motion Pad - Editor Mode"
 CONFIG_FILE = "config.yaml"
 
-# Global UI placement tracking states
 selected_region_idx = -1
 selected_corner_idx = -1
-fg_calibration_mode = False  # State tracking variable
+fg_calibration_mode = False
 
 def get_key(key_str):
-    special_keys = {"space": Key.space, "enter": Key.enter, "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right}
+    special_keys = {
+        "space": Key.space, "enter": Key.enter, 
+        "up": Key.up, "down": Key.down, 
+        "left": Key.left, "right": Key.right
+    }
     return special_keys.get(key_str.lower(), key_str)
+
+# Map OpenCV specific virtual key codes to string representations for comparison
+def parse_opencv_key(key_code):
+    # Windows/Linux standard virtual arrow keys for OpenCV
+    if key_code == 81 or key_code == 2424832: return "left"
+    if key_code == 82 or key_code == 2490368: return "up"
+    if key_code == 83 or key_code == 2555904: return "right"
+    if key_code == 84 or key_code == 2621440: return "down"
+    
+    # Fallback to standard alphanumeric characters
+    try:
+        return chr(key_code & 0xFF).lower()
+    except ValueError:
+        return ""
 
 def mouse_handler(event, x, y, flags, param):
     global selected_region_idx, selected_corner_idx, regions_data
@@ -69,7 +86,7 @@ print(" GUI CONTROLS:")
 print("  • CLICK & DRAG polygon corners directly on screen.")
 print("  • Press 'b' to autodetect EMPTY BACKGROUND (all boxes at once).")
 print("  • Press 'f' to enter FOREGROUND CALIBRATION MODE.")
-print("    -> Then press the actual key (e.g., 'w', 'a') while stepping inside.")
+print("    -> Then press the actual Arrow Key while stepping inside.")
 print("  • Press 's' to permanently SAVE all modifications to config.yaml.")
 print("  • Press 'ESC' or click 'X' to close.")
 print("=====================================================================")
@@ -92,12 +109,11 @@ while True:
         cv2.fillPoly(mask, [pts], 255)
         avg_color = cv2.mean(hsv_frame, mask=mask)[:3]
 
-        # UI Color changes to solid Yellow if the engine is listening for a key assignment
         if fg_calibration_mode:
-            color_draw = (0, 255, 255) # Yellow
+            color_draw = (0, 255, 255) 
             status_text = f"WAITING FOR KEY: '{reg['key'].upper()}'"
         else:
-            color_draw = (0, 255, 0) # Green default passive
+            color_draw = (0, 255, 0) 
             thresh_limit = reg.get('affinity_threshold', 50)
             status_text = f"Target: {thresh_limit}%"
 
@@ -132,15 +148,18 @@ while True:
             cv2.circle(frame, (int(pt[0] * width), int(pt[1] * height)), 4, (255, 255, 0), -1)
 
         text_pos = (int(reg['corners'][0][0] * width), int(reg['corners'][0][1] * height) - 10)
-        cv2.putText(frame, f"{reg['name']}: {status_text}", text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_draw, 1, cv2.LINE_AA)
+        cv2.putText(frame, status_text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_draw, 1, cv2.LINE_AA)
 
     cv2.imshow(WINDOW_NAME, frame)
-    key = cv2.waitKey(1) & 0xFF
+    
+    # Removed the '& 0xFF' mask here because full-width virtual key integer numbers 
+    # are required to identify arrow configurations correctly across platforms.
+    key = cv2.waitKey(1)
 
     if key == 27: # ESC
         break
     
-    elif key == ord('b'): 
+    elif key == ord('b') or key == ord('B'): 
         for reg in regions_data:
             pts = np.array([[int(p[0] * width), int(p[1] * height)] for p in reg['corners']], np.int32)
             mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
@@ -148,33 +167,30 @@ while True:
             reg['background_hsv'] = [int(x) for x in cv2.mean(hsv_frame, mask=mask)[:3]]
         print("✔ Background floor profile updated.")
 
-    elif key == ord('f'):
-        # Toggle the Calibration State Machine
+    elif key == ord('f') or key == ord('F'):
         fg_calibration_mode = True
-        print("🟨 Foreground mode active. Step in a box and hit its matching key on your keyboard...")
+        print("🟨 Foreground mode active. Step in a box and hit its matching arrow key on your keyboard...")
 
-    elif fg_calibration_mode and key != 0xFF:
-        # User pressed a key while in calibration mode
-        pressed_char = chr(key).lower()
+    elif fg_calibration_mode and key != -1:
+        pressed_key_name = parse_opencv_key(key)
         matched = False
         
         for reg in regions_data:
-            if reg['key'].lower() == pressed_char:
+            if reg['key'].lower() == pressed_key_name:
                 pts = np.array([[int(p[0] * width), int(p[1] * height)] for p in reg['corners']], np.int32)
                 mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
                 cv2.fillPoly(mask, [pts], 255)
                 
                 reg['foreground_hsv'] = [int(x) for x in cv2.mean(hsv_frame, mask=mask)[:3]]
-                print(f"✔ Linked foreground signature to game action: '{pressed_char.upper()}'")
+                print(f"✔ Linked foreground signature to game action: '{pressed_key_name.upper()}'")
                 matched = True
                 break
         
-        # Turn off listening state machine after registering the key stroke handler
         fg_calibration_mode = False
-        if not matched:
-            print("❌ Pressed key didn't match any configured region key. Mode closed.")
+        if not matched and pressed_key_name != "":
+            print(f"❌ Key '{pressed_key_name.upper()}' didn't match any configured region key. Mode closed.")
 
-    elif key == ord('s'):
+    elif key == ord('s') or key == ord('S'):
         config['regions'] = regions_data
         with open(CONFIG_FILE, 'w') as f:
             yaml.safe_dump(config, f, default_flow_style=None)

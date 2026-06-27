@@ -11,16 +11,6 @@ regions:
   key: left
   name: Left Step
 - affinity_threshold: 50
-  background_hsv: [62, 32, 135]
-  corners:
-  - [0.3921875, 0.71875]
-  - [0.4140625, 0.7229166666666667]
-  - [0.4109375, 0.78125]
-  - [0.3828125, 0.7791666666666667]
-  foreground_hsv: [91, 59, 33]
-  key: up
-  name: Up Step
-- affinity_threshold: 50
   background_hsv: [59, 29, 136]
   corners:
   - [0.4859375, 0.7229166666666667]
@@ -28,6 +18,16 @@ regions:
   - [0.5140625, 0.7875]
   - [0.4828125, 0.7833333333333333]
   foreground_hsv: [88, 60, 30]
+  key: up
+  name: Up Step
+- affinity_threshold: 50
+  background_hsv: [62, 32, 135]
+  corners:
+  - [0.3921875, 0.71875]
+  - [0.4140625, 0.7229166666666667]
+  - [0.4109375, 0.78125]
+  - [0.3828125, 0.7791666666666667]
+  foreground_hsv: [91, 59, 33]
   key: down
   name: Down Step
 - affinity_threshold: 50
