@@ -34,11 +34,12 @@ selected_region_idx = -1
 selected_corner_idx = -1
 
 # Calibration state machine
-#   'idle'        – normal operation
-#   'bg_pending'  – 'b' was pressed, waiting for the live frame to be captured
-#   'fg_waiting'  – 'f' was pressed, waiting for the user to step and press a key
-fg_calibration_mode = False   # kept for overlay colouring
+#   'idle'          – normal operation
+#   'fg_waiting'    – 'f' pressed, waiting for user to press a region key
+#   'fg_click'      – region key pressed, waiting for mouse click on shoe
 calibration_state   = 'idle'
+fg_pending_region   = None    # the reg dict we're about to sample fg for
+fg_click_point      = None    # (x, y) set by mouse_handler, consumed in main loop
 
 last_frame_time = time.time()
 
@@ -71,6 +72,19 @@ def sample_region_hsv(hsv_frame, reg, width, height):
         return None
     mean = cv2.mean(hsv_frame, mask=mask)
     return [int(x) for x in mean[:3]]
+
+def sample_point_hsv(hsv_frame, x, y, kernel_size=16):
+    """Return mean HSV of a kernel_size patch centred on (x, y)."""
+    h, w = hsv_frame.shape[:2]
+    x1 = max(0, x - kernel_size // 2)
+    y1 = max(0, y - kernel_size // 2)
+    x2 = min(w, x1 + kernel_size)
+    y2 = min(h, y1 + kernel_size)
+    roi = hsv_frame[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None
+    mean = cv2.mean(roi)
+    return [int(v) for v in mean[:3]]
 
 def calibration_status_summary():
     """Print a tidy table of which regions are calibrated."""
@@ -105,7 +119,14 @@ dims = {
 }
 
 def mouse_handler(event, x, y, flags, param):
-    global selected_region_idx, selected_corner_idx, regions_data
+    global selected_region_idx, selected_corner_idx, fg_click_point, calibration_state
+
+    # ── Foreground click capture (highest priority) ────────────────────────────
+    if calibration_state == 'fg_click' and event == cv2.EVENT_LBUTTONDOWN:
+        fg_click_point = (x, y)   # consumed in main loop on next frame
+        return
+
+    # ── Normal corner dragging ─────────────────────────────────────────────────
     width, height = param['width'], param['height']
     if event == cv2.EVENT_LBUTTONDOWN:
         min_dist = 15
@@ -148,8 +169,43 @@ while True:
     height, width = frame.shape[:2]
     dims['width'], dims['height'] = width, height
 
-    # HSV conversion happens once per frame — used by both detection and calibration
+    # HSV conversion once per frame
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # ── Consume pending foreground click ───────────────────────────────────────
+    if calibration_state == 'fg_click' and fg_click_point is not None:
+        cx, cy = fg_click_point
+        fg_click_point = None
+        result = sample_point_hsv(hsv_frame, cx, cy)
+        if result and fg_pending_region is not None:
+            fg_pending_region['foreground_hsv'] = result
+            print(f"  ✔  [{fg_pending_region['key'].upper()}]  foreground HSV = {result}  (sampled at {cx},{cy})")
+
+            # Draw a brief crosshair to give feedback (will show for one frame)
+            cv2.drawMarker(frame, (cx, cy), (0, 255, 255),
+                           cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
+
+            all_done = all(
+                reg.get('background_hsv') and reg.get('foreground_hsv')
+                for reg in regions_data
+            )
+            if all_done:
+                calibration_state = 'idle'
+                fg_pending_region = None
+                print("\n  🎉  All regions fully calibrated! Press 's' to save.\n")
+                calibration_status_summary()
+            else:
+                # Stay in fg_waiting so user can press next key
+                calibration_state = 'fg_waiting'
+                fg_pending_region = None
+                remaining = [
+                    reg['key'].upper() for reg in regions_data
+                    if not (reg.get('background_hsv') and reg.get('foreground_hsv'))
+                ]
+                print(f"  Still waiting for: {', '.join(remaining)}")
+                print("  Step onto the next pad, press its key, then click your shoe.\n")
+        else:
+            print("  ✘  Failed to sample — try clicking again.")
 
     # ── Per-region detection ───────────────────────────────────────────────────
     for idx, reg in enumerate(regions_data):
@@ -165,8 +221,8 @@ while True:
         max_box_presence   = 0.0
         active_motion_detected = False
         max_smooth_velocity    = -9999.0
-        kernel_size = 16
-        stride      = 16
+        kernel_size = 4
+        stride      = 4
 
         MOTION_VELOCITY_THRESH = 100
         TAP_DURATION_LIMIT     = 0.200
@@ -240,9 +296,9 @@ while True:
                     status_text = "TAP TRIGGER"
 
                 elif active_motion_detected:
+                    color_draw  = active_color
+                    status_text = f"HOLD"
                     last_trigger_times[idx] = current_time
-                    color_draw  = (255, 255, 0)
-                    status_text = "HOLD SUSTAINED"
                     if not key_is_down[idx]:
                         keyboard.press(target_key)
                         key_is_down[idx] = True
@@ -259,17 +315,20 @@ while True:
                     else:
                         ms_left = int((TAP_DURATION_LIMIT - time_held) * 1000)
                         color_draw  = active_color
-                        status_text = f"HOLDING ({ms_left}ms left)"
+                        status_text = f"HOLD"
             else:
                 if key_is_down[idx]:
                     keyboard.release(target_key)
                     key_is_down[idx] = False
                     print(f"  [x] KEY UP (Clear): {reg['key'].upper()}")
 
-        # ── Calibration overlay (always shown when in fg mode) ─────────────────
+        # ── Calibration overlay ────────────────────────────────────────────────
         if calibration_state == 'fg_waiting':
             color_draw  = (0, 255, 255)
             status_text = f"STEP ON PAD → press '{reg['key'].upper()}'"
+        elif calibration_state == 'fg_click' and fg_pending_region is reg:
+            color_draw  = (255, 165, 0)
+            status_text = f"CLICK YOUR SHOE on the preview"
 
         status_text += f" | Pres:{int(max_box_presence)}% | Vel:{int(max_smooth_velocity)}/s"
 
@@ -279,18 +338,28 @@ while True:
         cv2.putText(frame, status_text, (tx, ty),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_draw, 1, cv2.LINE_AA)
 
+    # ── Global overlay for fg_click state ─────────────────────────────────────
+    if calibration_state == 'fg_click':
+        key_name = fg_pending_region['key'].upper() if fg_pending_region else '?'
+        msg = f"[{key_name}] Click directly on your shoe"
+        cv2.putText(frame, msg, (10, height - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2, cv2.LINE_AA)
+
     cv2.imshow(WINDOW_NAME, frame)
 
     # ── Keyboard input ─────────────────────────────────────────────────────────
     key = cv2.waitKey(1)
 
-    if key == 27:   # ESC — quit
-        break
+    if key == 27:   # ESC
+        if calibration_state != 'idle':
+            calibration_state = 'idle'
+            fg_pending_region = None
+            fg_click_point    = None
+            print("  ✘  Calibration cancelled.\n")
+        else:
+            break
 
     elif key in (ord('b'), ord('B')):
-        # ── BACKGROUND calibration ─────────────────────────────────────────────
-        # Use the CURRENT hsv_frame (captured this loop iteration) so the
-        # sample is perfectly synchronised with what the user sees right now.
         print("\n━━━  BACKGROUND CALIBRATION  ━━━")
         print("  Sampling all regions (make sure the pad is clear)…")
         success_count = 0
@@ -303,72 +372,40 @@ while True:
             else:
                 print(f"  ✘  [{reg['key'].upper()}]  region mask was empty — check corner placement.")
         print(f"\n  {success_count}/{len(regions_data)} regions updated.")
-        print("  Next: press 'f', step onto a pad and press its arrow key.\n")
+        print("  Next: press 'f', press a region key, then click your shoe on the preview.\n")
         calibration_status_summary()
 
     elif key in (ord('f'), ord('F')):
-        # ── Start FOREGROUND calibration ───────────────────────────────────────
-        calibration_state   = 'fg_waiting'
-        fg_calibration_mode = True
+        calibration_state = 'fg_waiting'
+        fg_pending_region = None
         print("\n━━━  FOREGROUND CALIBRATION  ━━━")
-        print("  Step ONTO a pad, then press the matching key:")
+        print("  Step ONTO a pad, press its key, then click directly on your shoe:")
         for reg in regions_data:
             bg_tag = "(bg ✔)" if reg.get('background_hsv') else "(bg ✘ — run 'b' first!)"
             fg_tag = "(fg already set)" if reg.get('foreground_hsv') else ""
             print(f"    [{reg['key'].upper()}]  {bg_tag} {fg_tag}")
-        print("  Press any mapped key to capture, or ESC to cancel.\n")
+        print("  Press ESC to cancel.\n")
 
     elif key in (ord('s'), ord('S')):
-        # ── Save ───────────────────────────────────────────────────────────────
         config['regions'] = regions_data
         with open(CONFIG_FILE, 'w') as f:
             yaml.safe_dump(config, f, default_flow_style=None)
         print("  💾  Config saved →", CONFIG_FILE)
         calibration_status_summary()
 
-    elif calibration_state == 'fg_waiting' and key != -1:
-        # ── Capture FOREGROUND sample for the pressed key ──────────────────────
+    elif calibration_state == 'fg_waiting' and key != -1 and key != 27:
         pressed_key_name = parse_opencv_key(key)
-
-        if key == 27:   # ESC cancels foreground calibration
-            calibration_state   = 'idle'
-            fg_calibration_mode = False
-            print("  ✘  Foreground calibration cancelled.\n")
-
-        elif pressed_key_name:
-            matched = False
-            for reg in regions_data:
-                if reg['key'].lower() == pressed_key_name:
-                    result = sample_region_hsv(hsv_frame, reg, width, height)
-                    if result:
-                        reg['foreground_hsv'] = result
-                        print(f"  ✔  [{pressed_key_name.upper()}]  foreground HSV = {result}")
-                        matched = True
-                    else:
-                        print(f"  ✘  [{pressed_key_name.upper()}]  mask was empty — check corners.")
-                    break
-
-            if not matched:
-                print(f"  ✘  Key '{pressed_key_name.upper()}' doesn't match any region.")
-
-            # Check if all regions are now calibrated
-            all_done = all(
-                reg.get('background_hsv') and reg.get('foreground_hsv')
-                for reg in regions_data
+        if pressed_key_name:
+            matched_reg = next(
+                (reg for reg in regions_data if reg['key'].lower() == pressed_key_name),
+                None,
             )
-            if all_done:
-                calibration_state   = 'idle'
-                fg_calibration_mode = False
-                print("\n  🎉  All regions fully calibrated! Press 's' to save.\n")
-                calibration_status_summary()
+            if matched_reg:
+                fg_pending_region = matched_reg
+                calibration_state = 'fg_click'
+                print(f"  [{pressed_key_name.upper()}] selected — now click on your shoe in the preview window.")
             else:
-                # Tell the user what's still missing
-                remaining = [
-                    reg['key'].upper() for reg in regions_data
-                    if not (reg.get('background_hsv') and reg.get('foreground_hsv'))
-                ]
-                print(f"  Still waiting for: {', '.join(remaining)}")
-                print("  Step onto the next pad and press its key, or press 'f' to restart.\n")
+                print(f"  ✘  Key '{pressed_key_name.upper()}' doesn't match any region.")
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 cap.release()
